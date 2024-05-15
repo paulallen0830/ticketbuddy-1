@@ -28,7 +28,7 @@ function Tbuy() {
         date="20-05-2025"
       />
 
-      {a ? <View2 position={bidlist[0].position} /> : <View1 />}
+      {!a ? <View2 position={bidlist[0].position} /> : <View1 />}
 
       {/*<Footer year={new Date().getFullYear()} />*/}
     </div>
