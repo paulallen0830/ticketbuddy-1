@@ -14,6 +14,7 @@ db = SQLAlchemy(app)
 CORS(app)
 bcrypt=Bcrypt(app)
 
+wrf='wtfwtf'
 
 login_manager=LoginManager()
 login_manager.init_app(app)
