@@ -1,16 +1,40 @@
-from flask import Flask, request, jsonify 
+from flask import Flask, request, jsonify, redirect
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
 from flask_cors import CORS
 from sqlalchemy import event
+from flask_login import UserMixin,login_user,LoginManager,login_required,logout_user,current_user
+from flask_bcrypt import Bcrypt
 
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://postgres:supe@localhost/ticketbuddy'
+app.config['SECRET_KEY']='secretkey'
 db = SQLAlchemy(app)
 CORS(app)
+bcrypt=Bcrypt(app)
 
-class User(db.Model):
+login_manager=LoginManager()
+login_manager.init_app(app)
+login_manager.login_view="login"
+
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id))
+
+@app.route('/is_authenticated')
+def is_authenticated():
+    if current_user.is_authenticated:
+        return jsonify({'authenticated': True})
+    else:
+        return jsonify({'authenticated': False})
+
+@app.route('/logout',methods=['POST'])
+@login_required
+def logout():
+    logout_user()
+
+class User(db.Model,UserMixin):
     u_id = db.Column(db.Integer, primary_key=True)
     verification = db.Column(db.Boolean, default=False)
     email = db.Column(db.String(100), unique=True)
@@ -27,6 +51,9 @@ class User(db.Model):
     def __init__(self, user_name, password):
         self.user_name = user_name
         self.password = password
+
+    def get_id(self):
+        return self.u_id
 
     @staticmethod
     def create_user(user_name, password):
@@ -47,18 +74,10 @@ def format_user(user):
         "gender": user.gender,
     }
 
-with app.app_context():
-    db.create_all()
-
-@app.route('/')
-def hello():
-    return 'Hey!'
-
 @app.route('/signup', methods=['POST'])
 def signup():
-    data = request.get_json()
-    username = data.get('username')
-    password = data.get('password')
+    username = request.json['username']
+    password = bcrypt.generate_password_hash(request.json['password']).decode('utf-8')
 
     # Check if the username already exists
     if User.query.filter_by(user_name=username).first():
@@ -70,15 +89,6 @@ def signup():
     return jsonify({'message': 'User created successfully', 'user': formatted_user}), 201
 
 
-@app.route("/tk", methods = ['POST'])
-def create_tk():
-    user_name = request.json['user_name']
-    password = request.json['password']
-    user = User(user_name, password)
-    db.session.add(user)
-    db.session.commit()
-    return format_user(user)
-
 @app.route("/login", methods=["POST"])
 def login():
     data = request.json
@@ -88,7 +98,7 @@ def login():
     # Query the database to find the user with the provided username
     user = User.query.filter_by(user_name=user_name).first()
 
-    if user and user.password == password:
+    if user and bcrypt.check_password_hash(user.password,password):
         # Username and password are correct
         return jsonify({"message": "Login successful", "user": format_user(user)}), 200
     else:
@@ -169,10 +179,24 @@ class Ticket(db.Model):
     owner = db.Column(db.String(255))
     f_owner = db.Column(db.String(255))
     category = db.Column(db.String(50))  
+    status=db.Column(db.String(100), default="Available")      
 
     def __repr__(self):
         return f"Ticket(t_id={self.t_id}, e_id={self.e_id}, price={self.price}, bid_price={self.bid_price}, owner='{self.owner}', f_owner='{self.f_owner}', category='{self.category}')"
     
+class Bid(db.Model):
+    b_id=db.Column(db.Integer, primary_key=True)
+    bid_amount=db.Column(db.Float)
+    e_id=db.Column(db.Integer)
+    u_id=db.Column(db.Integer)
+    category = db.Column(db.String(50))
+
+    def __init__(self,bid_amount,e_id,u_id,category):
+        self.bid_amount=bid_amount
+        self.e_id=e_id
+        self.u_id=u_id        
+        self.category=category
+
 
 # initializing tables
     
@@ -220,6 +244,57 @@ def get_tickets():
         for ticket in tickets
     ]
     return jsonify(ticket_data)
+
+def no_auction(bid_amount,e_id,category,u_id):
+    ticket=Ticket.query.filter_by(e_id=e_id,category=category,status='Available').first()
+    if bid_amount>=ticket.price:
+        ticket.bid_price=bid_amount
+        ticket.owner=ticket.f_owner=u_id
+        ticket.status='Booked'
+        bid=Bid(bid_amount=bid_amount,e_id=e_id,u_id=u_id,category=category)
+        db.session.add(bid)
+        db.session.commit()
+
+def auction(bid_amount,e_id,category,u_id):
+    bid=Bid.query.filter_by(e_id=e_id,u_id=u_id).first()
+    if bid:
+        if bid_amount>bid.bid_amount:
+            bid.bid_amount=bid_amount
+    else:
+        bid=Bid(bid_amount=bid_amount,e_id=e_id,u_id=u_id,category=category)
+        db.session.add(bid)
+    db.session.commit()
+        
+
+def auction_task(bid_amount,e_id,category,u_id):
+    ticket=Ticket.query.filter_by(e_id=e_id,category=category,status='Available').first()
+    if ticket:
+        no_auction(bid_amount,e_id,category,u_id)
+    else:
+        auction(bid_amount,e_id,category,u_id)
+
+@app.route('/auction',methods=['POST'])
+@login_required
+def auction_mechanism():
+    bid_amount=request.json['bid_amount']
+    e_id=request.json['e_id']
+    category=request.json['category']
+    u_id=current_user.u_id
+    auction_task(bid_amount,e_id,category,u_id)
+    return jsonify({"message":"Successful"})
+
+@app.route('/auction_result',methods=['POST'])
+#@login_required
+def get_auction_result():
+    e_id=request.json['e_id']
+    category=request.json['category']
+    bids=Bid.query.order_by(Bid.bid_amount.desc()).all()
+    data=list()
+    for bid in bids:
+        bid_for={"b_id":bid.b_id,"bid_amount":bid.bid_amount,"e_id":bid.e_id,"u_id":bid.u_id,"category":bid.category}
+        data.append(bid_for)
+    return jsonify(data)
+
 
 
 if __name__ == '__main__':
